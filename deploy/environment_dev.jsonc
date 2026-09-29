@@ -76,16 +76,19 @@
   // Cores/memory can't exceed the pool's node size (Starter Pool = Medium
   // nodes, 8 cores / 56g). A custom pool must already exist in the workspace.
   // ------------------------------------------------------------------ //
+  // Dev is sized small on purpose (4 cores / 28g, max 2 executors): it
+  // runs on sample data and shouldn't burn capacity units. Production
+  // (environment_pro.jsonc) is sized for the real volumes.
   "compute": {
     "dev_insidemicrosoftfabric_ws_control": {},
     "dev_insidemicrosoftfabric_ws_bronze": {},
     "dev_insidemicrosoftfabric_ws_silver": {
       "instancePool": {"name": "Starter Pool", "type": "Workspace"},
-      "driverCores": 8,
-      "driverMemory": "56g",
-      "executorCores": 8,
-      "executorMemory": "56g",
-      "dynamicExecutorAllocation": {"enabled": true, "minExecutors": 1, "maxExecutors": 4}
+      "driverCores": 4,
+      "driverMemory": "28g",
+      "executorCores": 4,
+      "executorMemory": "28g",
+      "dynamicExecutorAllocation": {"enabled": true, "minExecutors": 1, "maxExecutors": 2}
     },
     "dev_insidemicrosoftfabric_ws_gold": {}
   }

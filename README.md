@@ -70,6 +70,7 @@ Runtime 2.0 is in public preview: re-check defaults against Microsoft Learn befo
 
 ### 0. Prerequisites
 
+- **A Variable Library `vl_environment` in every workspace** with a String variable `environment`: `"dev"` in the default value set (active in dev workspaces) and `"pro"` in a value set called `pro` (active in production). `get_paths()` depends on it. If you don't have it yet, `bootstrap_environments.py` creates it (step 2). It's part of the platform architecture ([Module 2](https://insidemicrosoftfabric.com/build/02-architecture/)).
 - Python 3.10+ locally: `pip install build azure-identity requests`
 - A Service Principal (app registration) with **Contributor** on every workspace in `workspaces_*.json`, and the tenant setting *Service principals can use Fabric APIs* enabled for it.
 - In each workspace: **Workspace settings > Data Engineering/Science > Spark settings > Pool > Customize compute configurations for items** ON (only needed if you use `compute`).
