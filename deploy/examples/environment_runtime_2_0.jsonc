@@ -1,0 +1,39 @@
+// Example: the DEV Environment on Runtime 2.0 (Spark 4, Delta 4, public preview).
+// To use it: copy it over deploy/environment_dev.jsonc, then run
+//   python deploy/migrate_runtime.py --target dev --whl dist/<your wheel>.whl
+//
+// What changes compared with 1.3:
+//   - Adaptive target file size, fast optimize, file-level compaction targets,
+//     deletion vectors and driver-mode snapshot are ON by default in 2.0, so
+//     they are no longer listed (leaving them in is harmless, just redundant).
+//   - The Native Execution Engine is still OFF by default: keep it.
+//   - Auto compaction is still not on by default: keep it.
+{
+  "environmentName": "dev_insidemicrosoftfabric_env_fabricutils",
+  "folder": "Utils",
+  "variableLibrary": {
+    "name": "vl_environment",
+    "activeValueSet": "Default value set"
+  },
+
+  "runtimeVersion": "2.0",
+
+  "sparkProperties": {
+    "spark.native.enabled": "true",
+    "spark.databricks.delta.autoCompact.enabled": "true"
+  },
+
+  "compute": {
+    "dev_insidemicrosoftfabric_ws_control": {},
+    "dev_insidemicrosoftfabric_ws_bronze": {},
+    "dev_insidemicrosoftfabric_ws_silver": {
+      "instancePool": {"name": "Starter Pool", "type": "Workspace"},
+      "driverCores": 8,
+      "driverMemory": "56g",
+      "executorCores": 8,
+      "executorMemory": "56g",
+      "dynamicExecutorAllocation": {"enabled": true, "minExecutors": 1, "maxExecutors": 4}
+    },
+    "dev_insidemicrosoftfabric_ws_gold": {}
+  }
+}

@@ -1,0 +1,115 @@
+# azure-pipelines.yml
+#
+#   Build      -> validates both config files, builds the wheel, publishes it as an artifact
+#   DeployDev  -> deploy.py --target dev   (automatic on main)
+#   DeployPro  -> deploy.py --target pro   (waits for the approval set on the
+#                                            Azure DevOps environment "fabric-pro")
+#
+# Pull requests to main run Build only (validation, no deploy).
+# migrate_runtime.py is NOT here on purpose: it's a one-off, run by hand.
+#
+# One-time setup in Azure DevOps:
+#   1. Pipelines > Library > Variable group "fabric-deploy-secrets" with
+#      FABRIC_TENANT_ID, FABRIC_CLIENT_ID, FABRIC_CLIENT_SECRET (secret),
+#      ideally linked to an Azure Key Vault.
+#   2. Pipelines > Environments: create "fabric-dev" and "fabric-pro".
+#      On "fabric-pro": Approvals and checks > Approvals > add the approvers.
+#   3. The Service Principal needs the Contributor role on every workspace
+#      in deploy/workspaces_dev.json and deploy/workspaces_pro.json.
+
+trigger:
+  branches:
+    include: [main]
+  paths:
+    include:
+      - src/**
+      - deploy/**
+      - pyproject.toml
+      - azure-pipelines.yml
+
+pr:
+  branches:
+    include: [main]
+
+pool:
+  vmImage: ubuntu-latest
+
+variables:
+  - group: fabric-deploy-secrets
+  - name: pythonVersion
+    value: "3.11"
+
+stages:
+  - stage: Build
+    jobs:
+      - job: BuildWheel
+        steps:
+          - task: UsePythonVersion@0
+            inputs:
+              versionSpec: $(pythonVersion)
+
+          - script: pip install build requests
+            displayName: Install build dependencies
+
+          - script: |
+              python deploy/deploy.py --target dev --validate-only
+              python deploy/deploy.py --target pro --validate-only
+            displayName: Validate environment config
+
+          - script: |
+              python -m compileall -q src deploy
+              python -m build --wheel
+            displayName: Build wheel
+
+          - publish: dist
+            artifact: whl
+
+  - stage: DeployDev
+    dependsOn: Build
+    condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/main'))
+    jobs:
+      - deployment: DeployDev
+        environment: fabric-dev
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - checkout: self
+                - task: UsePythonVersion@0
+                  inputs:
+                    versionSpec: $(pythonVersion)
+                - script: pip install azure-identity requests
+                  displayName: Install deploy dependencies
+                - script: |
+                    WHL=$(ls $(Pipeline.Workspace)/whl/*.whl)
+                    python deploy/deploy.py --target dev --whl "$WHL"
+                  displayName: Deploy to dev workspaces
+                  env:
+                    FABRIC_TENANT_ID: $(FABRIC_TENANT_ID)
+                    FABRIC_CLIENT_ID: $(FABRIC_CLIENT_ID)
+                    FABRIC_CLIENT_SECRET: $(FABRIC_CLIENT_SECRET)
+
+  - stage: DeployPro
+    dependsOn: DeployDev
+    condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/main'))
+    jobs:
+      - deployment: DeployPro
+        environment: fabric-pro   # the manual approval lives on this Azure DevOps environment
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - checkout: self
+                - task: UsePythonVersion@0
+                  inputs:
+                    versionSpec: $(pythonVersion)
+                - script: pip install azure-identity requests
+                  displayName: Install deploy dependencies
+                - script: |
+                    WHL=$(ls $(Pipeline.Workspace)/whl/*.whl)
+                    python deploy/deploy.py --target pro --whl "$WHL"
+                  displayName: Deploy to production workspaces
+                  env:
+                    FABRIC_TENANT_ID: $(FABRIC_TENANT_ID)
+                    FABRIC_CLIENT_ID: $(FABRIC_CLIENT_ID)
+                    FABRIC_CLIENT_SECRET: $(FABRIC_CLIENT_SECRET)

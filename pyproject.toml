@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+# Distribution name: this is what the .whl is called and what deploy.py
+# looks for in the Environment (fabric_enterprise_utils-<version>-py3-none-any.whl).
+# The package you import in notebooks is still `fabric_utils`.
+name = "fabric-enterprise-utils"
+version = "0.1.0"
+description = "Shared connections, functions and Spark helpers for Microsoft Fabric notebooks, deployed as a custom Environment library."
+requires-python = ">=3.10"
+
+# Keep this list short. When the Environment is published, Fabric installs
+# every dependency declared here from PyPI, and each one adds publish time.
+# pyspark, delta-spark, pandas and notebookutils are already in the Fabric
+# runtime, so they are NOT declared here.
+dependencies = []
+
+[tool.setuptools.packages.find]
+where = ["src"]

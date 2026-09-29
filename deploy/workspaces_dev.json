@@ -1,0 +1,6 @@
+{
+  "dev_insidemicrosoftfabric_ws_control": "00000000-0000-0000-0000-000000000001",
+  "dev_insidemicrosoftfabric_ws_bronze": "00000000-0000-0000-0000-000000000002",
+  "dev_insidemicrosoftfabric_ws_silver": "00000000-0000-0000-0000-000000000003",
+  "dev_insidemicrosoftfabric_ws_gold": "00000000-0000-0000-0000-000000000004"
+}
