@@ -28,6 +28,7 @@ fabric_environment/
     loggers.py                   # NotebookLogger -> control lakehouse
   deploy/
     fabric_api.py                # shared: auth, REST client, config validation
+    list_workspaces.py           # fills workspaces_*.json from Fabric (names + ids)
     bootstrap_environments.py    # once per workspace, with your user
     deploy.py                    # every release, with the Service Principal
     migrate_runtime.py           # one-off: change runtime (1.3 -> 2.0)
@@ -79,9 +80,24 @@ Runtime 2.0 is in public preview: re-check defaults against Microsoft Learn befo
 
 Use the [Custom Environment Builder](https://insidemicrosoftfabric.com/tools/custom-environment/) to generate them, or edit by hand:
 
-- `deploy/workspaces_dev.json` / `workspaces_pro.json`: name -> workspace id (from the URL: `.../groups/<workspace-id>/...`).
+- `deploy/workspaces_dev.json` / `workspaces_pro.json`: name -> workspace id. Don't copy the ids by hand, let `list_workspaces.py` read them from Fabric (below).
 - `deploy/environment_dev.jsonc` / `environment_pro.jsonc`: names, runtime, Spark properties, compute.
 - `src/fabric_utils/connections.py`: your workspace and lakehouse names in `LAYERS`.
+
+Get the workspace names and ids from Fabric (browser login with your user). It keeps the workspaces whose name starts with `dev_` / `pro_`:
+
+```bash
+python deploy/list_workspaces.py --target dev --target pro            # print: paste into the Builder
+python deploy/list_workspaces.py --target dev --target pro --write    # or write workspaces_*.json directly
+
+# Narrow it down, e.g. only the layer workspaces of one company:
+python deploy/list_workspaces.py --target dev --target pro --prefix "{target}_insidemicrosoftfabric_ws_" --write
+
+# With --spn it uses the Service Principal: what it lists is exactly what deploy.py can reach
+python deploy/list_workspaces.py --target pro --spn
+```
+
+`--write` prints what was added, removed or changed compared with the existing file. If a workspace is removed, remove it from `compute` in the `.jsonc` too.
 
 Check the files without touching Fabric:
 
