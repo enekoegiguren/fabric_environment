@@ -1,8 +1,16 @@
 # fabric_environment
 
-A custom Microsoft Fabric **Environment**, deployed as code: one shared Python library, the Spark properties (Native Execution Engine included) and the compute for every workspace, from dev to production through Azure DevOps.
+A custom Microsoft Fabric **Environment**, deployed as code. One item per workspace, set as the workspace default, that configures five things for every notebook:
 
-This is the deliverable for **Build · Module 4 · Part 1: Custom Environment** on [Inside Microsoft Fabric](https://insidemicrosoftfabric.com/build/04-pyspark-notebooks/01-custom-environment/). The **[Custom Environment Builder](https://insidemicrosoftfabric.com/tools/custom-environment/)** tool generates the config files in `deploy/` for your own workspaces.
+1. **Runtime**: 1.3 (Spark 3.5) or 2.0 (Spark 4), per stage.
+2. **Spark properties**: set once, applied when every session starts.
+3. **Spark pool and compute**: node size and executors per workspace, small in dev and sized for the load in production.
+4. **Native Execution Engine (NEE)**: on for every runtime, because it's off by default on 1.3 *and* 2.0.
+5. **Your enterprise functions**: shared code packaged as a versioned Python library (`.whl`), imported in one line.
+
+Points 1 to 4 are configuration and live in `deploy/environment_<stage>.jsonc`. Point 5 is code and lives in `src/fabric_utils`. All five go from dev to production through Azure DevOps.
+
+This is the deliverable for **Build · Module 4 · Part 1: Custom Environment** on [Inside Microsoft Fabric](https://insidemicrosoftfabric.com/build/04-pyspark-notebooks/01-custom-environment/). The **[Custom Environment Builder](https://insidemicrosoftfabric.com/tools/custom-environment/)** generates the config files in `deploy/` (points 1 to 4) for your own workspaces. Point 5 is your own code, so it's written here, in the repo.
 
 ## What it replaces
 
@@ -26,6 +34,7 @@ fabric_environment/
     schema.py                    # print_schema(), enforce_destination_schema()
     transform.py                 # rename_columns(), trim_string_columns(), deduplicate()...
     loggers.py                   # NotebookLogger -> control lakehouse
+    business.py                  # add_surrogate_key(): template for your business rules
   deploy/
     fabric_api.py                # shared: auth, REST client, config validation
     list_workspaces.py           # fills workspaces_*.json from Fabric (names + ids)
@@ -45,15 +54,24 @@ fabric_environment/
 
 ## What lives where
 
-| What | Scope | Defined in | Seen in Fabric |
-|---|---|---|---|
-| Library (`.whl`) | Every workspace | `src/fabric_utils` | Environment > Custom libraries |
-| Runtime | Per target (dev / pro) | `runtimeVersion` | Environment > Runtime |
-| Spark properties | Per target | `sparkProperties` | Environment > Spark compute > Spark properties |
-| Compute | Per workspace | `compute.<workspace>` | Environment > Spark compute > Compute |
-| Current env (`dev` / `pro`) | Per workspace | Variable Library value set | `vl_environment` item |
+| # | What | Scope | Defined in | Seen in Fabric |
+|---|---|---|---|---|
+| 1 | Runtime | Per stage (dev / pro) | `runtimeVersion` | Environment > Runtime |
+| 2 | Spark properties | Per stage | `sparkProperties` | Environment > Spark compute > Spark properties |
+| 3 | Spark pool and compute | Per workspace | `compute.<workspace>` | Environment > Spark compute > Compute |
+| 4 | NEE | Per stage | `"spark.native.enabled": "true"` in `sparkProperties` | Environment > Spark compute > Acceleration |
+| 5 | Enterprise functions (`.whl`) | Every workspace | `src/fabric_utils` + `version` in `pyproject.toml` | Environment > Custom libraries |
+| | Current env (`dev` / `pro`) | Per workspace | Variable Library value set | `vl_environment` item |
 
-## Runtime 1.3 vs 2.0: which Spark properties you need
+## 1. Runtime
+
+`runtimeVersion` is `"1.3"` (Spark 3.5, Delta 3.2, GA) or `"2.0"` (Spark 4, Delta 4, public preview). It can differ per stage, e.g. 2.0 in dev while you validate and 1.3 in production.
+
+On the first deploy the Environment is still empty, so `deploy.py` sets the runtime from the file. After that it only **checks** it: once a library is published, changing the runtime directly fails with `LibraryManagementError`, so it goes through `migrate_runtime.py` (see [step 6 of the setup](#6-change-runtime-one-off)).
+
+## 2. Spark properties
+
+`sparkProperties` is the **complete list**: a property added by hand in the UI is removed on the next deploy. Values are always strings (`"true"`, not `true`). What you need depends on the runtime, because 2.0 turns on several Delta optimizations that are opt-in on 1.3:
 
 | Property | Runtime 1.3 | Runtime 2.0 |
 |---|---|---|
@@ -65,7 +83,98 @@ fabric_environment/
 | `spark.databricks.delta.properties.defaults.enableDeletionVectors` | Set it | On by default |
 | `spark.microsoft.delta.snapshot.driverMode.enabled` | Set it | On by default |
 
-Runtime 2.0 is in public preview: re-check defaults against Microsoft Learn before moving production to it.
+Runtime 2.0 is in public preview: re-check defaults against Microsoft Learn before moving production to it. The comments in `environment_dev.jsonc` list other common properties (resource profile, V-Order, timezone), and `deploy/examples/environment_runtime_2_0.jsonc` shows a 2.0 file.
+
+A config that only one notebook or one read needs stays in code, scoped so it doesn't leak into the rest of the session:
+
+```python
+with session_config(spark, spark__sql__parquet__datetimeRebaseModeInRead="LEGACY"):
+    df_legacy = spark.read.parquet(paths["path_bronze_files"] + "legacy/")
+```
+
+## 3. Spark pool and compute
+
+`compute` has one entry per workspace (key = name in `workspaces_<stage>.json`). `{}` leaves that workspace as it is.
+
+```jsonc
+"dev_insidemicrosoftfabric_ws_silver": {
+  "instancePool": {"name": "Starter Pool", "type": "Workspace"},
+  "driverCores": 4, "driverMemory": "28g", "executorCores": 4, "executorMemory": "28g",
+  "dynamicExecutorAllocation": {"enabled": true, "minExecutors": 1, "maxExecutors": 2}
+}
+```
+
+- `instancePool` is the Starter Pool or a custom pool that already exists (`"type": "Workspace"` or `"Capacity"`).
+- Cores and memory go in pairs: 4/28g, 8/56g, 16/112g, 32/224g, 64/400g, and can't exceed the pool's node size. The Starter Pool uses Medium nodes (8 cores / 56g), so anything bigger needs a custom pool.
+- Requires *Customize compute configurations for items* ON in the workspace's Spark settings.
+
+## 4. Native Execution Engine
+
+NEE runs Spark SQL and DataFrame operations in native, vectorized code instead of the JVM. It's **off by default on every runtime**, so both example files set `"spark.native.enabled": "true"`.
+
+- **Check it**: `check_environment(spark)` prints the effective value and warns if it's off. The Spark UI's *Queries for Native Engine* tab shows which operators ran natively (green) and which fell back to the JVM (light blue).
+- **If one query regresses**, don't turn it off for everyone. Wrap that block:
+
+```python
+with native_disabled(spark):
+    save_table(df_problematic, paths["path_silver"], "customers_history")
+```
+
+## 5. Your enterprise functions
+
+The shared code that used to live in `%run Functions` notebooks goes in `src/fabric_utils` and ships as a wheel: `fabric-enterprise-utils` as the file, `import fabric_utils` in notebooks. It's the one point the Custom Environment Builder doesn't generate, because it's your code, not configuration.
+
+**Why a wheel and not a notebook:**
+
+- **Versioned**: every release has a number (`version` in `pyproject.toml`), and `check_environment()` shows which one is live in each workspace.
+- **Reviewed and tested**: every change goes through a pull request, and the pipeline builds the wheel before anything reaches Fabric.
+- **Same code everywhere**: the Environment installs the same wheel in every workspace, and production only gets it after an approval. No copies drifting between workspaces.
+- **No hidden state**: a notebook can't quietly depend on a variable another `%run` notebook defined.
+
+**What goes in:** anything more than one notebook uses: paths, read/write, schema enforcement, logging, alerts, and business rules such as surrogate keys. **What stays out:** the transformation logic for one specific table, which stays in its notebook.
+
+### Add a function
+
+1. Write it in the module where it belongs, or in a new one. `business.py` is the template for business rules:
+
+   ```python
+   # src/fabric_utils/business.py
+   def add_surrogate_key(df, keys, name="sk"):
+       parts = [F.coalesce(F.col(k).cast("string"), F.lit("<null>")) for k in keys]
+       return df.withColumn(name, F.xxhash64(*parts))
+   ```
+
+2. Import it in `src/fabric_utils/__init__.py`, so `from fabric_utils import *` exposes it:
+
+   ```python
+   from fabric_utils.business import add_surrogate_key
+   ```
+
+3. Bump `version` in `pyproject.toml` and `__version__` in `__init__.py` (e.g. `0.1.0` -> `0.2.0`).
+4. Open a pull request. The pipeline builds the new wheel, deploys it to dev and, after approval, to production.
+
+Keep `dependencies` in `pyproject.toml` short: Fabric installs each one from PyPI when the Environment publishes. PySpark, Delta, pandas and `notebookutils` are already in the runtime.
+
+### Use it in a notebook
+
+No `%run`, no `%pip install`. The Environment is the workspace default, so the library is already installed:
+
+```python
+from fabric_utils import *
+
+paths = get_paths()                      # "dev" or "pro", from the Variable Library
+log = NotebookLogger("nb_silver_customers", layer="silver")
+
+df = load_data(paths["path_bronze"], "customers")
+df = deduplicate(trim_string_columns(df), keys=["customer_id"], order_by="modified_at")
+df = add_surrogate_key(df, keys=["customer_id"], name="sk_customer")
+save_table(df, paths["path_silver"], "customers")
+log.end()
+```
+
+The full example is `notebooks/nb_silver_customers.ipynb`.
+
+**Trade-off:** sessions on an Environment with custom libraries don't get the Starter Pool's near-instant start, because the library is installed first (about a minute or more instead of a few seconds). For scheduled pipelines it rarely matters.
 
 ## Setup
 

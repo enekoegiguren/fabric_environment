@@ -48,6 +48,9 @@ from fabric_utils.transform import (
 )
 from fabric_utils.loggers import NotebookLogger
 
+# --- Your enterprise functions: shared business rules ---
+from fabric_utils.business import add_surrogate_key
+
 # Everything defined above is exported by `from fabric_utils import *`,
 # except names starting with "_". New imports are picked up automatically.
 __all__ = [name for name in dir() if not name.startswith("_")]
