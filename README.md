@@ -37,10 +37,11 @@ fabric_environment/
     business.py                  # add_surrogate_key(): template for your business rules
   deploy/
     fabric_api.py                # shared: auth, REST client, config validation
+    dependencies.py              # shared: wheel dependencies vs each runtime's Python
+    check_dependencies.py        # proposes (and applies) compatible versions in pyproject.toml
     list_workspaces.py           # fills workspaces_*.json from Fabric (names + ids)
     bootstrap_environments.py    # once per workspace, with your user
-    deploy.py                    # every release, with the Service Principal
-    migrate_runtime.py           # one-off: change runtime (1.3 -> 2.0)
+    deploy.py                    # every release, with the Service Principal (+ runtime changes)
     environment_dev.jsonc        # names, runtime, Spark properties, compute (documented)
     environment_pro.jsonc
     workspaces_dev.json          # workspace name -> workspace id
@@ -67,7 +68,7 @@ fabric_environment/
 
 `runtimeVersion` is `"1.3"` (Spark 3.5, Delta 3.2, GA) or `"2.0"` (Spark 4, Delta 4, public preview). It can differ per stage, e.g. 2.0 in dev while you validate and 1.3 in production.
 
-On the first deploy the Environment is still empty, so `deploy.py` sets the runtime from the file. After that it only **checks** it: once a library is published, changing the runtime directly fails with `LibraryManagementError`, so it goes through `migrate_runtime.py` (see [step 6 of the setup](#6-change-runtime-one-off)).
+On the first deploy the Environment is still empty, so `deploy.py` sets the runtime from the file. After that it only **checks** it by default: once a library is published, changing the runtime directly fails with `LibraryManagementError`, so the change needs `deploy.py --allow-runtime-change`, run by hand (see [step 6 of the setup](#6-change-runtime-one-off)).
 
 ## 2. Spark properties
 
@@ -155,6 +156,22 @@ The shared code that used to live in `%run Functions` notebooks goes in `src/fab
 
 Keep `dependencies` in `pyproject.toml` short: Fabric installs each one from PyPI when the Environment publishes. PySpark, Delta, pandas and `notebookutils` are already in the runtime.
 
+### Dependencies and the runtime's Python
+
+Each runtime has its own Python: **1.3 -> Python 3.11**, **2.0 -> Python 3.13** (`RUNTIME_PYTHON` in `deploy/fabric_api.py`). If a dependency doesn't support it, the publish fails with `Spark_User_LPS_PIP_PACKAGE_NOT_FOUND`, e.g. `semantic-link-labs==0.14.3` only supports Python < 3.13.
+
+```bash
+python deploy/check_dependencies.py            # checks dev + pro, proposes and asks before changing anything
+python deploy/check_dependencies.py --yes      # apply the proposal without asking
+python deploy/check_dependencies.py --check    # report only (exit 1 if incompatible), what the pipeline runs
+```
+
+It looks up every dependency on PyPI and, if one can't be installed on a target's Python, proposes the **minimum** later version that works on all of them (the same wheel goes to dev and pro). If you accept, it updates `pyproject.toml` and bumps the patch version (and `__version__`). Then rebuild the wheel and deploy.
+
+`deploy.py` runs the same check on the wheel before touching Fabric and stops if something doesn't fit, so a runtime change never leaves the Environment empty because of a publish that was going to fail. `--skip-dependency-check` turns it off (e.g. without PyPI access).
+
+Only direct dependencies are checked: Fabric's publish is still the final check, and a version jump can bring API changes (test what uses that library in dev).
+
 ### Use it in a notebook
 
 No `%run`, no `%pip install`. The Environment is the workspace default, so the library is already installed:
@@ -181,7 +198,7 @@ The full example is `notebooks/nb_silver_customers.ipynb`.
 ### 0. Prerequisites
 
 - **A Variable Library `vl_environment` in every workspace** with a String variable `environment`: `"dev"` in the default value set (active in dev workspaces) and `"pro"` in a value set called `pro` (active in production). `get_paths()` depends on it. If you don't have it yet, `bootstrap_environments.py` creates it (step 2). It's part of the platform architecture ([Module 2](https://insidemicrosoftfabric.com/build/02-architecture/)).
-- Python 3.10+ locally: `pip install build azure-identity requests`
+- Python 3.11+ locally: `pip install build azure-identity requests packaging`
 - A Service Principal (app registration) with **Contributor** on every workspace in `workspaces_*.json`, and the tenant setting *Service principals can use Fabric APIs* enabled for it.
 - In each workspace: **Workspace settings > Data Engineering/Science > Spark settings > Pool > Customize compute configurations for items** ON (only needed if you use `compute`).
 
@@ -237,7 +254,7 @@ python deploy/deploy.py --target dev --whl dist/fabric_enterprise_utils-0.1.0-py
 
 Per workspace: runtime check -> replace wheel -> stage Spark properties + compute -> publish (3-6 min) -> set as workspace default -> activate the value set.
 
-On the first deploy the Environment is still empty, so deploy.py sets `runtimeVersion` from the file (1.3 or 2.0) before uploading. After that, changing the runtime goes through `migrate_runtime.py`.
+On the first deploy the Environment is still empty, so deploy.py sets `runtimeVersion` from the file (1.3 or 2.0) before uploading. After that, changing the runtime needs `--allow-runtime-change` (step 6).
 
 ### 4. Verify
 
@@ -261,19 +278,26 @@ Bump `version` in `pyproject.toml` (and `__version__` in `src/fabric_utils/__ini
 
 ### 6. Change runtime (one-off)
 
-1. Set `runtimeVersion` in `environment_<target>.jsonc` (see `deploy/examples/environment_runtime_2_0.jsonc`).
-2. `python deploy/migrate_runtime.py --target dev --whl dist/<wheel>.whl`
-3. Test the notebooks in dev, then repeat with `--target pro`.
+1. Set `runtimeVersion` in `environment_<target>.jsonc` and review `sparkProperties` (see `deploy/examples/environment_runtime_2_0.jsonc`).
+2. `python deploy/check_dependencies.py` and, if it changed anything, `python -m build --wheel` (see [Dependencies and the runtime's Python](#dependencies-and-the-runtimes-python)).
+3. `python deploy/deploy.py --target dev --whl dist/<wheel>.whl --allow-runtime-change`
+4. Test the notebooks in dev, then repeat with `--target pro`.
 
-It runs Microsoft's sequence (remove libraries -> publish -> change runtime -> upload -> publish) to avoid `LibraryManagementError`. It removes **every** custom library in the Environment, not just this one.
+It runs Microsoft's sequence to avoid `LibraryManagementError` (remove libraries -> publish empty -> change runtime) and then carries on with the normal deploy (upload the wheel, stage Spark properties + compute, publish). One command, two publishes.
+
+- While it runs the Environment is published **empty** for a few minutes: a notebook starting then won't have `fabric_utils`. Run it when nothing is scheduled.
+- It removes **every** custom library in the Environment, not just this one, and only uploads the wheel again. It lists what it removes.
+- If it stops halfway, re-run it: with the Environment already empty the runtime change is direct, and workspaces already migrated are left alone.
+- The pipeline never passes the flag: if `runtimeVersion` changes in the file before you've migrated by hand, the pipeline's deploy fails on the runtime check instead of emptying an Environment unattended.
 
 ## Troubleshooting
 
 | Error | Cause | Fix |
 |---|---|---|
 | `403 FeatureNotAvailable` creating an item | SPN can't create items in your tenant | Run `bootstrap_environments.py` (uses your user) |
-| `Environment is on runtime X, config says Y` | Runtime changed in the file or the UI | `migrate_runtime.py`, or fix the file |
-| `LibraryManagementError` | Runtime changed with a library published | Use `migrate_runtime.py` |
+| `Environment is on runtime X, config says Y` | Runtime changed in the file or the UI | `deploy.py --allow-runtime-change`, or fix the file |
+| `LibraryManagementError` | Runtime changed with a library published | Use `deploy.py --allow-runtime-change` |
+| `Spark_User_LPS_PIP_PACKAGE_NOT_FOUND` on publish | A dependency doesn't support the runtime's Python | `python deploy/check_dependencies.py`, rebuild, deploy |
 | `publish operation in progress` | Someone else is publishing | deploy.py skips that workspace; re-run later |
 | Property added in the UI disappeared | `sparkProperties` is declarative | Add it to the `.jsonc` file |
 | `Could not read 'environment' from the Variable Library` | No `vl_environment` in that workspace | Run bootstrap for that workspace |

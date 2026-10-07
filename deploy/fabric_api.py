@@ -1,5 +1,5 @@
 """
-Shared helpers for bootstrap_environments.py, deploy.py and migrate_runtime.py:
+Shared helpers for bootstrap_environments.py, deploy.py and list_workspaces.py:
 authentication, a thin Fabric REST client (error bodies + long-running
 operations), config loading/validation, and the idempotent ensure_* calls.
 
@@ -21,6 +21,9 @@ CONFIG_DIR = Path(__file__).parent
 TARGETS = ("dev", "pro")
 
 RUNTIMES = ("1.3", "2.0")
+# Python version of each runtime: the wheel's dependencies must support it or
+# the publish fails with Spark_User_LPS_PIP_PACKAGE_NOT_FOUND.
+RUNTIME_PYTHON = {"1.3": "3.11", "2.0": "3.13"}
 # Node sizes: cores -> memory. Driver/executor must use one of these pairs.
 CORE_MEMORY = {4: "28g", 8: "56g", 16: "112g", 32: "224g", 64: "400g"}
 
@@ -34,7 +37,7 @@ def get_credential(interactive: bool = False):
     interactive=True  -> your user, via browser (bootstrap: creating items with
                           a Service Principal can fail with 403 FeatureNotAvailable).
     interactive=False -> Service Principal from FABRIC_TENANT_ID / FABRIC_CLIENT_ID /
-                          FABRIC_CLIENT_SECRET (deploy + migrate, and the pipeline).
+                          FABRIC_CLIENT_SECRET (deploy, locally and in the pipeline).
     """
     if interactive:
         from azure.identity import InteractiveBrowserCredential
