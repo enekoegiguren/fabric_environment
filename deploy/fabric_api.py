@@ -1,5 +1,5 @@
 """
-Shared helpers for bootstrap_environments.py, deploy.py and migrate_runtime.py:
+Shared helpers for bootstrap_environments.py, deploy.py and list_workspaces.py:
 authentication, a thin Fabric REST client (error bodies + long-running
 operations), config loading/validation, and the idempotent ensure_* calls.
 
@@ -34,7 +34,7 @@ def get_credential(interactive: bool = False):
     interactive=True  -> your user, via browser (bootstrap: creating items with
                           a Service Principal can fail with 403 FeatureNotAvailable).
     interactive=False -> Service Principal from FABRIC_TENANT_ID / FABRIC_CLIENT_ID /
-                          FABRIC_CLIENT_SECRET (deploy + migrate, and the pipeline).
+                          FABRIC_CLIENT_SECRET (deploy, locally and in the pipeline).
     """
     if interactive:
         from azure.identity import InteractiveBrowserCredential

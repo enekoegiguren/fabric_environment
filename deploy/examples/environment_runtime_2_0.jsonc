@@ -1,6 +1,6 @@
 // Example: the DEV Environment on Runtime 2.0 (Spark 4, Delta 4, public preview).
 // To use it: copy it over deploy/environment_dev.jsonc, then run
-//   python deploy/migrate_runtime.py --target dev --whl dist/<your wheel>.whl
+//   python deploy/deploy.py --target dev --whl dist/<your wheel>.whl --allow-runtime-change
 //
 // What changes compared with 1.3:
 //   - Adaptive target file size, fast optimize, file-level compaction targets,
