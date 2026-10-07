@@ -2,6 +2,11 @@
 Step 2 -- deploy the fabric_utils wheel + Spark config to every workspace of
 a target. Runs with the Service Principal, locally or in Azure Pipelines.
 
+Before touching Fabric it checks on PyPI that the wheel's dependencies install
+on the runtime's Python (see dependencies.py), and stops if not: a runtime
+change never leaves the Environment empty because of a publish that was going
+to fail. check_dependencies.py proposes the versions to use.
+
 For each workspace in workspaces_<target>.json:
   1. Find the Environment (created by bootstrap_environments.py)
   2. Runtime: if it doesn't match runtimeVersion
@@ -37,9 +42,10 @@ from pathlib import Path
 
 import requests
 
+from dependencies import check_requirements, format_issues, wheel_requirements
 from fabric_api import (
-    TARGETS, FabricClient, find_environment, get_credential, get_spark_compute, list_custom_libraries,
-    load_target, patch_spark_compute, publish, remove_libraries, upload_library,
+    RUNTIME_PYTHON, TARGETS, FabricClient, find_environment, get_credential, get_spark_compute,
+    list_custom_libraries, load_target, patch_spark_compute, publish, remove_libraries, upload_library,
 )
 
 
@@ -169,6 +175,8 @@ def main():
     parser.add_argument("--allow-runtime-change", action="store_true",
                         help="Allow migrating the runtime of an Environment with the wheel published (not in the pipeline)")
     parser.add_argument("--validate-only", action="store_true", help="Check the config files and exit")
+    parser.add_argument("--skip-dependency-check", action="store_true",
+                        help="Don't check the wheel's dependencies on PyPI (e.g. no internet access)")
     args = parser.parse_args()
 
     workspaces, config = load_target(args.target)
@@ -178,6 +186,16 @@ def main():
         return
     if not args.whl or not args.whl.exists():
         raise SystemExit(f"Wheel not found: {args.whl} (build it with: python -m build)")
+
+    if not args.skip_dependency_check:
+        python = RUNTIME_PYTHON[config["runtimeVersion"]]
+        print(f"Checking the dependencies of {args.whl.name} for Python {python} "
+              f"(runtime {config['runtimeVersion']})...")
+        issues = check_requirements(wheel_requirements(args.whl), [python])
+        if issues:
+            raise SystemExit(f"\n[!] The publish would fail, Fabric not touched:\n{format_issues(issues)}\n\n"
+                             f"Fix it with: python deploy/check_dependencies.py  (then rebuild the wheel)")
+        print("[ok] Dependencies compatible")
 
     client = FabricClient(get_credential())
     errors = []
