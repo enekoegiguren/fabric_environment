@@ -1,6 +1,7 @@
 # azure-pipelines.yml
 #
-#   Build      -> validates both config files, builds the wheel, publishes it as an artifact
+#   Build      -> validates both config files, checks the dependencies against
+#                 each runtime's Python, builds the wheel, publishes it as an artifact
 #   DeployDev  -> deploy.py --target dev   (automatic on main)
 #   DeployPro  -> deploy.py --target pro   (waits for the approval set on the
 #                                            Azure DevOps environment "fabric-pro")
@@ -49,13 +50,18 @@ stages:
             inputs:
               versionSpec: $(pythonVersion)
 
-          - script: pip install build requests
+          - script: pip install build requests packaging
             displayName: Install build dependencies
 
           - script: |
               python deploy/deploy.py --target dev --validate-only
               python deploy/deploy.py --target pro --validate-only
             displayName: Validate environment config
+
+          # Fails if a dependency in pyproject.toml can't be installed on a
+          # target's runtime Python. Fix it locally: python deploy/check_dependencies.py
+          - script: python deploy/check_dependencies.py --check
+            displayName: Check dependencies against runtime Python
 
           - script: |
               python -m compileall -q src deploy
@@ -79,7 +85,7 @@ stages:
                 - task: UsePythonVersion@0
                   inputs:
                     versionSpec: $(pythonVersion)
-                - script: pip install azure-identity requests
+                - script: pip install azure-identity requests packaging
                   displayName: Install deploy dependencies
                 - script: |
                     WHL=$(ls $(Pipeline.Workspace)/whl/*.whl)
@@ -104,7 +110,7 @@ stages:
                 - task: UsePythonVersion@0
                   inputs:
                     versionSpec: $(pythonVersion)
-                - script: pip install azure-identity requests
+                - script: pip install azure-identity requests packaging
                   displayName: Install deploy dependencies
                 - script: |
                     WHL=$(ls $(Pipeline.Workspace)/whl/*.whl)
