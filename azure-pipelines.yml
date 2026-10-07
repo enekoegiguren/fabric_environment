@@ -6,7 +6,8 @@
 #                                            Azure DevOps environment "fabric-pro")
 #
 # Pull requests to main run Build only (validation, no deploy).
-# migrate_runtime.py is NOT here on purpose: it's a one-off, run by hand.
+# deploy.py runs here WITHOUT --allow-runtime-change on purpose: changing the
+# runtime of a published Environment is a one-off, run by hand.
 #
 # One-time setup in Azure DevOps:
 #   1. Pipelines > Library > Variable group "fabric-deploy-secrets" with

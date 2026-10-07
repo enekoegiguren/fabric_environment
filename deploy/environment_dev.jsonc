@@ -1,5 +1,5 @@
 // Custom Environment for the DEV workspaces.
-// Read by bootstrap_environments.py, deploy.py and migrate_runtime.py.
+// Read by bootstrap_environments.py and deploy.py.
 // Full-line '//' comments are allowed; the rest is strict JSON (watch the
 // commas when you uncomment something: the last key of a block has none).
 //
@@ -23,9 +23,12 @@
 
   // ------------------------------------------------------------------ //
   // RUNTIME -- "1.3" (Spark 3.5, Delta 3.2, GA) or "2.0" (Spark 4, Delta 4, preview).
-  // deploy.py only CHECKS it. To change it, edit it here and run
-  // migrate_runtime.py (a direct change with the wheel published fails
-  // with LibraryManagementError).
+  // If the Environment is on another one, deploy.py:
+  //   - Empty Environment (fresh from bootstrap): sets it directly
+  //   - Wheel already published: fails, unless you run it by hand with
+  //     --allow-runtime-change (removes libraries, publishes empty, changes
+  //     the runtime, then the normal deploy). Changing it without that
+  //     sequence fails with LibraryManagementError.
   // ------------------------------------------------------------------ //
   "runtimeVersion": "1.3",
 

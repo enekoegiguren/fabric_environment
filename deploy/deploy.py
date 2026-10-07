@@ -4,8 +4,13 @@ a target. Runs with the Service Principal, locally or in Azure Pipelines.
 
 For each workspace in workspaces_<target>.json:
   1. Find the Environment (created by bootstrap_environments.py)
-  2. Check its runtime matches runtimeVersion (a fresh, empty Environment
-     gets it set here; one with a library published -> migrate_runtime.py)
+  2. Runtime: if it doesn't match runtimeVersion
+       - Empty Environment (no libraries): set it directly
+       - Wheel already published: only with --allow-runtime-change, which runs
+         Microsoft's sequence to avoid LibraryManagementError (remove
+         libraries -> publish empty -> change runtime -> carry on with the
+         normal deploy, which uploads the wheel again and publishes). Without
+         the flag it fails before touching anything.
   3. Replace the old wheel with the new one in staging
   4. Stage sparkProperties + compute.<workspace>, only if something changed
   5. Publish (3-6 min) and wait
@@ -16,8 +21,15 @@ Usage:
     export FABRIC_TENANT_ID=... FABRIC_CLIENT_ID=... FABRIC_CLIENT_SECRET=...
     python deploy/deploy.py --target dev --whl dist/fabric_enterprise_utils-0.1.0-py3-none-any.whl
 
+    # Change runtime (edit runtimeVersion in environment_<target>.jsonc first):
+    python deploy/deploy.py --target dev --whl dist/fabric_enterprise_utils-0.1.0-py3-none-any.whl --allow-runtime-change
+
     # Validate the config files only (no API calls, no credentials needed):
     python deploy/deploy.py --target dev --validate-only
+
+--allow-runtime-change is NOT used in azure-pipelines.yml on purpose: during
+the migration the Environment is published empty for a few minutes, and any
+notebook starting then won't have fabric_utils. Run it by hand, dev first.
 """
 
 import argparse
@@ -67,7 +79,39 @@ def build_compute_patch(current: dict, spark_properties, compute: dict) -> dict:
     return patch
 
 
-def deploy_workspace(client: FabricClient, label: str, ws_id: str, whl: Path, config: dict) -> None:
+def ensure_runtime(client: FabricClient, ws_id: str, env_id: str, current: dict, wanted: str,
+                   allow_change: bool) -> dict:
+    """
+    Leave the staging runtime on `wanted`. Returns the current sparkcompute
+    (re-read if something changed). If a run stops halfway, just re-run it:
+    with the Environment already empty the change is direct.
+    """
+    runtime = current.get("runtimeVersion")
+    if runtime == wanted:
+        print(f"    [=] Runtime {runtime}")
+        return current
+
+    libraries = list_custom_libraries(client, ws_id, env_id)
+    if libraries:
+        if not allow_change:
+            raise RuntimeError(
+                f"Environment is on runtime {runtime}, config says {wanted}. Changing it with libraries "
+                f"published fails with LibraryManagementError: re-run by hand with --allow-runtime-change."
+            )
+        # Microsoft's sequence removes EVERY library, not just the wheel: list them,
+        # because deploy.py only uploads the wheel again.
+        print(f"    [i] Migrating runtime {runtime} -> {wanted}. Removing: {', '.join(libraries)}")
+        remove_libraries(client, ws_id, env_id)
+        print("    [i] Publishing the empty Environment (notebooks starting now won't have fabric_utils)")
+        publish(client, ws_id, env_id)
+
+    patch_spark_compute(client, ws_id, env_id, {"runtimeVersion": wanted})
+    print(f"    [+] Runtime {runtime} -> {wanted}")
+    return get_spark_compute(client, ws_id, env_id)
+
+
+def deploy_workspace(client: FabricClient, label: str, ws_id: str, whl: Path, config: dict,
+                     allow_runtime_change: bool) -> None:
     print(f"\n=== {label} ({ws_id}) ===")
     name = config["environmentName"]
     env_id = find_environment(client, ws_id, name)
@@ -75,18 +119,7 @@ def deploy_workspace(client: FabricClient, label: str, ws_id: str, whl: Path, co
         raise RuntimeError(f"Environment '{name}' not found. Run bootstrap_environments.py for this workspace first.")
 
     current = get_spark_compute(client, ws_id, env_id)
-    runtime, wanted = current.get("runtimeVersion"), config["runtimeVersion"]
-    if runtime != wanted:
-        if list_custom_libraries(client, ws_id, env_id):
-            # Changing the runtime with a custom library published fails with
-            # LibraryManagementError, so deploy.py never does it.
-            raise RuntimeError(f"Environment is on runtime {runtime}, config says {wanted}. Run migrate_runtime.py.")
-        # Fresh Environment from bootstrap (no libraries yet): set the runtime
-        # before the first upload. Same as steps 3-5 of the migration sequence.
-        patch_spark_compute(client, ws_id, env_id, {"runtimeVersion": wanted})
-        print(f"    [+] Empty Environment: runtime {runtime} -> {wanted}")
-    else:
-        print(f"    [=] Runtime {runtime}")
+    current = ensure_runtime(client, ws_id, env_id, current, config["runtimeVersion"], allow_runtime_change)
 
     try:
         # Wheel files are named <dist_name>-<version>-..., so this removes every version of our package only.
@@ -133,6 +166,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--target", choices=TARGETS, required=True)
     parser.add_argument("--whl", type=Path)
+    parser.add_argument("--allow-runtime-change", action="store_true",
+                        help="Allow migrating the runtime of an Environment with the wheel published (not in the pipeline)")
     parser.add_argument("--validate-only", action="store_true", help="Check the config files and exit")
     args = parser.parse_args()
 
@@ -148,7 +183,7 @@ def main():
     errors = []
     for label, ws_id in workspaces.items():
         try:
-            deploy_workspace(client, label, ws_id, args.whl, config)
+            deploy_workspace(client, label, ws_id, args.whl, config, args.allow_runtime_change)
         except Exception as e:
             print(f"    [!] ERROR: {e}")
             errors.append(f"{label}: {e}")
