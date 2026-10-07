@@ -77,8 +77,14 @@ def build_compute_patch(current: dict, spark_properties, compute: dict) -> dict:
     patch = {}
     if spark_properties is not None:
         desired = {k: _prop_str(v) for k, v in spark_properties.items()}
-        if _props_to_dict(current.get("sparkProperties")) != desired:
-            patch["sparkProperties"] = [{"key": k, "value": v} for k, v in desired.items()]
+        existing = _props_to_dict(current.get("sparkProperties"))
+        if existing != desired:
+            # The API's PATCH MERGES properties: the ones not sent stay. To remove
+            # one it has to be sent with a null value.
+            patch["sparkProperties"] = (
+                [{"key": k, "value": v} for k, v in desired.items()]
+                + [{"key": k, "value": None} for k in existing if k not in desired]
+            )
     for key, value in compute.items():
         if _differs(current.get(key), value):
             patch[key] = value
