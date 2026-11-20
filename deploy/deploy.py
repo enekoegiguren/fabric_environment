@@ -22,12 +22,23 @@ For each workspace in workspaces_<target>.json:
   6. Set it as the workspace's default Environment
   7. Activate the Variable Library value set for this target
 
+Then, for Python notebooks (they can't use an Environment), if the config has
+"pythonLibs":
+  8. Upload the wheel to that lakehouse folder (Files/libs/fabric_utils) and
+     delete the older versions, so the folder always holds exactly one
+  9. Keep the variable fabric_utils_libs in every workspace's Variable Library:
+     default value = the dev folder, value set "pro" = the pro folder. Python
+     notebooks read it to find the wheel.
+
 Usage:
     export FABRIC_TENANT_ID=... FABRIC_CLIENT_ID=... FABRIC_CLIENT_SECRET=...
-    python deploy/deploy.py --target dev --whl dist/fabric_enterprise_utils-0.1.0-py3-none-any.whl
+    python deploy/deploy.py --target dev --whl dist/fabric_enterprise_utils-0.2.0-py3-none-any.whl
 
     # Change runtime (edit runtimeVersion in environment_<target>.jsonc first):
-    python deploy/deploy.py --target dev --whl dist/fabric_enterprise_utils-0.1.0-py3-none-any.whl --allow-runtime-change
+    python deploy/deploy.py --target dev --whl dist/fabric_enterprise_utils-0.2.0-py3-none-any.whl --allow-runtime-change
+
+    # Only the wheel for Python notebooks (Environments untouched; seconds instead of minutes):
+    python deploy/deploy.py --target dev --whl dist/fabric_enterprise_utils-0.2.0-py3-none-any.whl --python-libs-only
 
     # Validate the config files only (no API calls, no credentials needed):
     python deploy/deploy.py --target dev --validate-only
@@ -38,14 +49,17 @@ notebook starting then won't have fabric_utils. Run it by hand, dev first.
 """
 
 import argparse
+import json
 from pathlib import Path
 
 import requests
 
 from dependencies import check_requirements, format_issues, wheel_requirements
 from fabric_api import (
-    RUNTIME_PYTHON, TARGETS, FabricClient, find_environment, get_credential, get_spark_compute,
-    list_custom_libraries, load_target, patch_spark_compute, publish, remove_libraries, upload_library,
+    RUNTIME_PYTHON, TARGETS, FabricClient, OneLakeClient, find_environment, find_variable_library,
+    get_credential, get_spark_compute, get_variable_library_definition, list_custom_libraries, load_target,
+    patch_spark_compute, publish, python_libs_abfss, remove_libraries, update_variable_library_definition,
+    upload_library,
 )
 
 
@@ -174,6 +188,101 @@ def set_value_set(client: FabricClient, ws_id: str, vl_config: dict) -> None:
     print(f"    [+] Active value set -> '{wanted}'")
 
 
+# --------------------------------------------------------------------------- #
+# Python notebooks: wheel in a lakehouse folder + fabric_utils_libs variable
+# --------------------------------------------------------------------------- #
+
+LIBS_VARIABLE = "fabric_utils_libs"
+LIBS_VARIABLE_NOTE = "Folder with the fabric_utils wheel for Python notebooks (deploy.py > pythonLibs)"
+PRO_VALUE_SET = "valueSets/pro.json"
+
+
+def deploy_python_libs(onelake: OneLakeClient, libs: dict, whl: Path) -> None:
+    """
+    Put the wheel in the Python notebooks' folder, then delete the older
+    versions (after the upload, so the folder is never empty).
+    """
+    workspace = libs["workspace"]
+    folder = f"{libs['lakehouse']}.Lakehouse/{libs['folder'].strip('/')}"
+    print(f"\n=== Python notebooks: {workspace}/{folder} ===")
+    onelake.upload_file(workspace, f"{folder}/{whl.name}", whl.read_bytes())
+    print(f"    [+] Uploaded {whl.name}")
+    prefix = whl.name.split("-")[0] + "-"
+    for name in onelake.list_files(workspace, folder):
+        if name != whl.name and name.startswith(prefix) and name.endswith(".whl"):
+            onelake.delete_file(workspace, f"{folder}/{name}")
+            print(f"    [-] Deleted {name}")
+
+
+def _json_bytes(obj: dict) -> bytes:
+    return (json.dumps(obj, indent=2, ensure_ascii=False) + "\n").encode("utf-8")
+
+
+def ensure_libs_variable(client: FabricClient, ws_id: str, vl_name: str, dev_value: str, pro_value: str) -> None:
+    """
+    fabric_utils_libs in the workspace's Variable Library: dev_value by default,
+    pro_value in the "pro" value set. Only writes if it's missing or different.
+    """
+    vl = find_variable_library(client, ws_id, vl_name)
+    if vl is None:
+        print(f"    [!] Variable Library '{vl_name}' not found -- {LIBS_VARIABLE} not added")
+        return
+    parts = get_variable_library_definition(client, ws_id, vl["id"])
+    changed = []
+
+    variables = json.loads(parts["variables.json"])
+    var = next((v for v in variables.setdefault("variables", []) if v.get("name") == LIBS_VARIABLE), None)
+    if var is None:
+        variables["variables"].append({"name": LIBS_VARIABLE, "note": LIBS_VARIABLE_NOTE, "type": "String",
+                                       "value": dev_value})
+        changed.append("new variable")
+    elif var.get("value") != dev_value:
+        var["value"] = dev_value
+        changed.append("default value")
+
+    value_set = None
+    if PRO_VALUE_SET in parts:
+        value_set = json.loads(parts[PRO_VALUE_SET])
+        overrides = value_set.setdefault("variableOverrides", [])
+        over = next((o for o in overrides if o.get("name") == LIBS_VARIABLE), None)
+        if over is None:
+            overrides.append({"name": LIBS_VARIABLE, "value": pro_value})
+            changed.append("pro value")
+        elif over.get("value") != pro_value:
+            over["value"] = pro_value
+            changed.append("pro value")
+    else:
+        print(f"    [!] '{vl_name}' has no 'pro' value set: {LIBS_VARIABLE} only gets the dev value")
+
+    if not changed:
+        print(f"    [=] {LIBS_VARIABLE} up to date in '{vl_name}'")
+        return
+    parts["variables.json"] = _json_bytes(variables)
+    if value_set is not None:
+        parts[PRO_VALUE_SET] = _json_bytes(value_set)
+    update_variable_library_definition(client, ws_id, vl["id"], parts)
+    print(f"    [+] {LIBS_VARIABLE} in '{vl_name}' ({', '.join(changed)})")
+
+
+def sync_libs_variable(client: FabricClient, workspaces: dict, vl_name: str, errors: list) -> None:
+    """fabric_utils_libs in every workspace of the target, with the pythonLibs folders of dev and pro."""
+    dev_libs = load_target("dev")[1].get("pythonLibs")
+    pro_libs = load_target("pro")[1].get("pythonLibs")
+    if not dev_libs or not pro_libs:
+        print(f"\n[!] pythonLibs missing in environment_dev.jsonc or environment_pro.jsonc: "
+              f"{LIBS_VARIABLE} not touched")
+        return
+    dev_value, pro_value = python_libs_abfss(dev_libs), python_libs_abfss(pro_libs)
+    print(f"\n=== Variable {LIBS_VARIABLE} (Variable Library '{vl_name}') ===")
+    for label, ws_id in workspaces.items():
+        print(f"  {label}")
+        try:
+            ensure_libs_variable(client, ws_id, vl_name, dev_value, pro_value)
+        except Exception as e:
+            print(f"    [!] ERROR: {e}")
+            errors.append(f"{label} ({LIBS_VARIABLE}): {e}")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--target", choices=TARGETS, required=True)
@@ -183,6 +292,8 @@ def main():
     parser.add_argument("--validate-only", action="store_true", help="Check the config files and exit")
     parser.add_argument("--skip-dependency-check", action="store_true",
                         help="Don't check the wheel's dependencies on PyPI (e.g. no internet access)")
+    parser.add_argument("--python-libs-only", action="store_true",
+                        help="Only upload the wheel for Python notebooks (pythonLibs); Environments untouched")
     args = parser.parse_args()
 
     workspaces, config = load_target(args.target)
@@ -192,6 +303,19 @@ def main():
         return
     if not args.whl or not args.whl.exists():
         raise SystemExit(f"Wheel not found: {args.whl} (build it with: python -m build)")
+
+    libs = config.get("pythonLibs")
+    if args.python_libs_only:
+        if not libs:
+            raise SystemExit(f"environment_{args.target}.jsonc has no pythonLibs")
+        credential = get_credential()
+        errors = []
+        deploy_python_libs(OneLakeClient(credential), libs, args.whl)
+        sync_libs_variable(FabricClient(credential), workspaces, config["variableLibrary"]["name"], errors)
+        if errors:
+            raise SystemExit("\nErrors:\n  - " + "\n  - ".join(errors))
+        print("\nDeploy done (Python notebooks only).")
+        return
 
     if not args.skip_dependency_check:
         python = RUNTIME_PYTHON[config["runtimeVersion"]]
@@ -203,7 +327,8 @@ def main():
                              f"Fix it with: python deploy/check_dependencies.py  (then rebuild the wheel)")
         print("[ok] Dependencies compatible")
 
-    client = FabricClient(get_credential())
+    credential = get_credential()
+    client = FabricClient(credential)
     errors = []
     for label, ws_id in workspaces.items():
         try:
@@ -211,6 +336,14 @@ def main():
         except Exception as e:
             print(f"    [!] ERROR: {e}")
             errors.append(f"{label}: {e}")
+
+    if libs:
+        try:
+            deploy_python_libs(OneLakeClient(credential), libs, args.whl)
+        except Exception as e:
+            print(f"    [!] ERROR in pythonLibs: {e}")
+            errors.append(f"pythonLibs: {e}")
+        sync_libs_variable(client, workspaces, config["variableLibrary"]["name"], errors)
 
     if errors:
         raise SystemExit("\nFailed workspaces:\n  - " + "\n  - ".join(errors))

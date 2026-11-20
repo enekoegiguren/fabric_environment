@@ -6,6 +6,7 @@ Creates, in every workspace of workspaces_<target>.json:
   - an empty Environment named "environmentName"
   - the Variable Library "variableLibrary.name" with one String variable,
     `environment`: "dev" in the default value set, "pro" in a value set called "pro"
+    (deploy.py adds `fabric_utils_libs` later if the config has "pythonLibs")
 
 Why a user and not the Service Principal: creating new items with an SPN can
 return 403 FeatureNotAvailable, depending on tenant settings. Once the items
@@ -25,7 +26,7 @@ from fabric_api import (
     TARGETS, FabricClient, ensure_environment, ensure_folder, get_credential, load_target,
 )
 
-VL_SCHEMA = "https://developer.microsoft.com/json-schemas/fabric/item/VariableLibrary/definition"
+VL_SCHEMA = "https://developer.microsoft.com/json-schemas/fabric/item/variableLibrary/definition"
 
 
 def _b64(obj: dict) -> str:
@@ -42,19 +43,24 @@ def ensure_variable_library(client: FabricClient, ws_id: str, name: str, folder_
         print(f"    [=] Variable Library '{name}' exists (not modified)")
         return
 
+    # Same format as a Variable Library exported to Git by Fabric.
     variables = {
         "$schema": f"{VL_SCHEMA}/variables/1.0.0/schema.json",
         "variables": [{
             "name": "environment",
+            "note": "Current environment. Read by fabric_utils.get_env() / get_paths().",
             "type": "String",
             "value": "dev",
-            "note": "Current environment. Read by fabric_utils.get_env() / get_paths().",
         }],
     }
     value_set_pro = {
-        "$schema": f"{VL_SCHEMA}/valueSets/1.0.0/schema.json",
-        "valueSetName": "pro",
-        "overrides": [{"name": "environment", "value": "pro"}],
+        "$schema": f"{VL_SCHEMA}/valueSet/1.0.0/schema.json",
+        "name": "pro",
+        "variableOverrides": [{"name": "environment", "value": "pro"}],
+    }
+    settings = {
+        "$schema": f"{VL_SCHEMA}/settings/1.0.0/schema.json",
+        "valueSetsOrder": ["pro"],
     }
     platform = {
         "$schema": "https://developer.microsoft.com/json-schemas/fabric/gitIntegration/platformProperties/2.0.0/schema.json",
@@ -67,6 +73,7 @@ def ensure_variable_library(client: FabricClient, ws_id: str, name: str, folder_
         "definition": {"parts": [
             _part("variables.json", variables),
             _part("valueSets/pro.json", value_set_pro),
+            _part("settings.json", settings),
             _part(".platform", platform),
         ]},
     }

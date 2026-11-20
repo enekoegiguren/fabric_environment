@@ -22,6 +22,21 @@
   },
 
   // ------------------------------------------------------------------ //
+  // PYTHON NOTEBOOKS -- they can't use an Environment, so deploy.py also
+  // uploads the wheel to this lakehouse folder (and deletes older versions),
+  // and keeps the variable fabric_utils_libs in every workspace's Variable
+  // Library pointing at it. Python notebooks install it from there with
+  // pip --no-deps (see README, "Python notebooks").
+  // The identity that runs the notebooks needs read access to this lakehouse.
+  // Remove the block if you don't use Python notebooks.
+  // ------------------------------------------------------------------ //
+  "pythonLibs": {
+    "workspace": "dev_insidemicrosoftfabric_ws_control",
+    "lakehouse": "dev_insidemicrosoftfabric_control_lh",
+    "folder": "Files/libs/fabric_utils"
+  },
+
+  // ------------------------------------------------------------------ //
   // RUNTIME -- "1.3" (Spark 3.5, Delta 3.2, GA) or "2.0" (Spark 4, Delta 4, preview).
   // If the Environment is on another one, deploy.py:
   //   - Empty Environment (fresh from bootstrap): sets it directly

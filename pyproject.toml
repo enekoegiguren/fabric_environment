@@ -7,14 +7,16 @@ build-backend = "setuptools.build_meta"
 # looks for in the Environment (fabric_enterprise_utils-<version>-py3-none-any.whl).
 # The package you import in notebooks is still `fabric_utils`.
 name = "fabric-enterprise-utils"
-version = "0.1.0"
-description = "Shared connections, functions and Spark helpers for Microsoft Fabric notebooks, deployed as a custom Environment library."
+version = "0.2.0"
+description = "Shared connections, functions and Spark helpers for Microsoft Fabric notebooks, deployed as a custom Environment library (Spark notebooks) and from a lakehouse folder (Python notebooks)."
 requires-python = ">=3.10"
 
 # Keep this list short. When the Environment is published, Fabric installs
 # every dependency declared here from PyPI, and each one adds publish time.
 # pyspark, delta-spark, pandas and notebookutils are already in the Fabric
-# runtime, so they are NOT declared here.
+# runtime, so they are NOT declared here. Neither are duckdb, pyarrow and
+# deltalake (python mode): they ship with the Fabric Python runtime, and
+# Python notebooks install this wheel with --no-deps anyway.
 dependencies = []
 
 [tool.setuptools.packages.find]
