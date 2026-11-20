@@ -12,7 +12,7 @@ Points 1 to 4 are configuration and live in `deploy/environment_<stage>.jsonc`. 
 
 **Python notebooks too.** Fabric Python notebooks (no Spark) [can't use an Environment](https://learn.microsoft.com/fabric/data-engineering/using-python-experience-on-notebook#known-limitations). The same wheel reaches them by a second route: `deploy.py` copies it to a lakehouse folder, and one install cell at the top of the notebook installs it. `from fabric_utils import *` detects that there's no Spark and loads the python mode (DuckDB + deltalake). See [Python notebooks](#python-notebooks).
 
-This is the deliverable for **Build · Module 4 · Part 1: Custom Environment** on [Inside Microsoft Fabric](https://insidemicrosoftfabric.com/build/04-pyspark-notebooks/01-custom-environment/). The **[Custom Environment Builder](https://insidemicrosoftfabric.com/tools/custom-environment/)** generates the config files in `deploy/` (points 1 to 4) for your own workspaces. Point 5 is your own code, so it's written here, in the repo.
+This is the deliverable for **Build · Module 4 · Part 1: Custom Environment** on [Inside Microsoft Fabric](https://imfabric.dev/build/04-pyspark-notebooks/01-custom-environment/). The **[Custom Environment Builder](https://imfabric.dev/tools/custom-environment/)** generates the config files in `deploy/` (points 1 to 4) for your own workspaces. Point 5 is your own code, so it's written here, in the repo.
 
 ## What it replaces
 
@@ -201,7 +201,7 @@ The full example is `notebooks/nb_silver_customers.ipynb`.
 
 ## Python notebooks
 
-Python notebooks run on one machine with DuckDB, Polars and deltalake preinstalled, and use far fewer capacity units than Spark for small and medium tables ([benchmark](https://insidemicrosoftfabric.com/articles/spark-vs-duckdb-vs-polars-fabric/)). They can't use an Environment, so:
+Python notebooks run on one machine with DuckDB, Polars and deltalake preinstalled, and use far fewer capacity units than Spark for small and medium tables ([benchmark](https://imfabric.dev/articles/spark-vs-duckdb-vs-polars-fabric/)). They can't use an Environment, so:
 
 1. **One wheel, two modes.** `fabric_utils/__init__.py` checks whether `pyspark` and `delta` are importable. In a Python notebook they aren't, so it exports only what works without Spark:
 
@@ -256,14 +256,14 @@ Tables that Spark also writes must not use deletion vectors: delta-rs (deltalake
 
 ### 0. Prerequisites
 
-- **A Variable Library `vl_environment` in every workspace** with a String variable `environment`: `"dev"` in the default value set (active in dev workspaces) and `"pro"` in a value set called `pro` (active in production). `get_paths()` depends on it. If you don't have it yet, `bootstrap_environments.py` creates it (step 2). It's part of the platform architecture ([Module 2](https://insidemicrosoftfabric.com/build/02-architecture/)).
+- **A Variable Library `vl_environment` in every workspace** with a String variable `environment`: `"dev"` in the default value set (active in dev workspaces) and `"pro"` in a value set called `pro` (active in production). `get_paths()` depends on it. If you don't have it yet, `bootstrap_environments.py` creates it (step 2). It's part of the platform architecture ([Module 2](https://imfabric.dev/build/02-architecture/)).
 - Python 3.11+ locally: `pip install build azure-identity requests packaging`
 - A Service Principal (app registration) with **Contributor** on every workspace in `workspaces_*.json`, and the tenant setting *Service principals can use Fabric APIs* enabled for it.
 - In each workspace: **Workspace settings > Data Engineering/Science > Spark settings > Pool > Customize compute configurations for items** ON (only needed if you use `compute`).
 
 ### 1. Fill in your workspaces and config
 
-Use the [Custom Environment Builder](https://insidemicrosoftfabric.com/tools/custom-environment/) to generate them, or edit by hand:
+Use the [Custom Environment Builder](https://imfabric.dev/tools/custom-environment/) to generate them, or edit by hand:
 
 - `deploy/workspaces_dev.json` / `workspaces_pro.json`: name -> workspace id. Don't copy the ids by hand, let `list_workspaces.py` read them from Fabric (below).
 - `deploy/environment_dev.jsonc` / `environment_pro.jsonc`: names, runtime, Spark properties, compute.
