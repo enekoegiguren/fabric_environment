@@ -7,16 +7,20 @@ Requirements:
     pip install azure-identity requests
 """
 
+import base64
 import json
 import os
 import time
 from pathlib import Path
-from typing import Dict, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
+from urllib.parse import quote
 
 import requests
 
 FABRIC_API = "https://api.fabric.microsoft.com/v1"
 SCOPE = "https://api.fabric.microsoft.com/.default"
+ONELAKE = "https://onelake.dfs.fabric.microsoft.com"
+STORAGE_SCOPE = "https://storage.azure.com/.default"
 CONFIG_DIR = Path(__file__).parent
 TARGETS = ("dev", "pro")
 
@@ -101,6 +105,60 @@ class FabricClient:
         raise TimeoutError(f"Operation did not finish in {timeout_s}s: {op_url}")
 
 
+class OneLakeClient:
+    """
+    Minimal OneLake client (the ADLS Gen2 API) to put files in a lakehouse's
+    Files folder. deploy.py uses it to publish the wheel for Python notebooks.
+    Same credential as FabricClient, with the storage scope.
+    """
+
+    def __init__(self, credential):
+        self._credential = credential
+
+    def _request(self, method: str, url: str, context: str = "", allow: Tuple[int, ...] = (),
+                 **kwargs) -> requests.Response:
+        headers = {
+            "Authorization": f"Bearer {self._credential.get_token(STORAGE_SCOPE).token}",
+            "x-ms-version": "2023-11-03",
+            **kwargs.pop("headers", {}),
+        }
+        r = requests.request(method, url, headers=headers, timeout=300, **kwargs)
+        if not r.ok and r.status_code not in allow:
+            print(f"    [!] HTTP {r.status_code}{f' ({context})' if context else ''}: {r.text}")
+            r.raise_for_status()
+        return r
+
+    @staticmethod
+    def _url(workspace: str, path: str) -> str:
+        return f"{ONELAKE}/{quote(workspace)}/{quote(path.strip('/'))}"
+
+    def list_files(self, workspace: str, directory: str) -> List[str]:
+        """File names in the folder (no subfolders). [] if the folder doesn't exist yet."""
+        r = self._request("GET", f"{ONELAKE}/{quote(workspace)}", context=f"list {directory}", allow=(404,),
+                          params={"resource": "filesystem", "recursive": "false", "directory": directory.strip("/")})
+        if r.status_code == 404:
+            return []
+        return [p["name"].rsplit("/", 1)[-1] for p in r.json().get("paths", [])
+                if str(p.get("isDirectory", "false")).lower() != "true"]
+
+    def upload_file(self, workspace: str, path: str, data: bytes) -> None:
+        """Create (or overwrite) the file: create + append + flush. Missing folders are created."""
+        url = self._url(workspace, path)
+        self._request("PUT", url, params={"resource": "file"}, context=f"create {path}")
+        self._request("PATCH", url, params={"action": "append", "position": "0"}, data=data,
+                      headers={"Content-Type": "application/octet-stream"}, context=f"append {path}")
+        self._request("PATCH", url, params={"action": "flush", "position": str(len(data))}, context=f"flush {path}")
+
+    def delete_file(self, workspace: str, path: str) -> None:
+        self._request("DELETE", self._url(workspace, path), context=f"delete {path}", allow=(404,))
+
+
+def python_libs_abfss(libs: dict) -> str:
+    """abfss path of the pythonLibs folder: what Python notebooks read (variable fabric_utils_libs)."""
+    return (f"abfss://{libs['workspace']}@onelake.dfs.fabric.microsoft.com/"
+            f"{libs['lakehouse']}.Lakehouse/{libs['folder'].strip('/')}")
+
+
 # --------------------------------------------------------------------------- #
 # Config
 # --------------------------------------------------------------------------- #
@@ -134,6 +192,14 @@ def validate_config(target: str, workspaces: Dict[str, str], config: dict) -> li
     for label, ws_id in workspaces.items():
         if len(ws_id) != 36 or ws_id.count("-") != 4:
             errors.append(f"workspaces_{target}.json: '{label}' has an invalid workspace id: {ws_id!r}")
+
+    libs = config.get("pythonLibs")
+    if libs is not None:
+        for key in ("workspace", "lakehouse", "folder"):
+            if not libs.get(key):
+                errors.append(f"pythonLibs: missing '{key}'")
+        if libs.get("folder") and not libs["folder"].strip("/").startswith("Files/"):
+            errors.append(f"pythonLibs.folder must be under Files/, got {libs['folder']!r}")
 
     props = config.get("sparkProperties") or {}
     for k, v in props.items():
@@ -231,3 +297,29 @@ def publish(client: FabricClient, ws_id: str, env_id: str) -> None:
     print("    [~] Publishing (usually 3-6 minutes)...")
     client.wait(client.post(f"/workspaces/{ws_id}/environments/{env_id}/staging/publish", context="publish"))
     print("    [+] Published")
+
+
+# --------------------------------------------------------------------------- #
+# Variable Library definition (Python notebooks: variable fabric_utils_libs)
+# --------------------------------------------------------------------------- #
+
+def find_variable_library(client: FabricClient, ws_id: str, name: str) -> Optional[dict]:
+    r = client.get(f"/workspaces/{ws_id}/variableLibraries", context="list variable libraries")
+    return next((v for v in r.json().get("value", []) if v["displayName"] == name), None)
+
+
+def get_variable_library_definition(client: FabricClient, ws_id: str, vl_id: str) -> Dict[str, bytes]:
+    """{path: content} of the current definition (variables.json, settings.json, valueSets/*.json, .platform)."""
+    r = client.wait(client.post(f"/workspaces/{ws_id}/variableLibraries/{vl_id}/getDefinition",
+                                context="get variable library definition"))
+    return {part["path"]: base64.b64decode(part["payload"]) for part in r.json()["definition"]["parts"]}
+
+
+def update_variable_library_definition(client: FabricClient, ws_id: str, vl_id: str, parts: Dict[str, bytes]) -> None:
+    """Replaces the whole definition: send every part (except .platform)."""
+    body = {"definition": {"parts": [
+        {"path": path, "payload": base64.b64encode(data).decode("ascii"), "payloadType": "InlineBase64"}
+        for path, data in parts.items() if path != ".platform"
+    ]}}
+    client.wait(client.post(f"/workspaces/{ws_id}/variableLibraries/{vl_id}/updateDefinition",
+                            json=body, context="update variable library definition"))

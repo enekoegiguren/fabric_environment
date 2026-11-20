@@ -9,6 +9,13 @@
     "activeValueSet": "pro"
   },
 
+  // Python notebooks: the wheel goes to the PRODUCTION control lakehouse.
+  "pythonLibs": {
+    "workspace": "pro_insidemicrosoftfabric_ws_control",
+    "lakehouse": "pro_insidemicrosoftfabric_control_lh",
+    "folder": "Files/libs/fabric_utils"
+  },
+
   "runtimeVersion": "1.3",
 
   "sparkProperties": {

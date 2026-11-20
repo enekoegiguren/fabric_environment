@@ -10,6 +10,8 @@ A custom Microsoft Fabric **Environment**, deployed as code. One item per worksp
 
 Points 1 to 4 are configuration and live in `deploy/environment_<stage>.jsonc`. Point 5 is code and lives in `src/fabric_utils`. All five go from dev to production through Azure DevOps.
 
+**Python notebooks too.** Fabric Python notebooks (no Spark) [can't use an Environment](https://learn.microsoft.com/fabric/data-engineering/using-python-experience-on-notebook#known-limitations). The same wheel reaches them by a second route: `deploy.py` copies it to a lakehouse folder, and one install cell at the top of the notebook installs it. `from fabric_utils import *` detects that there's no Spark and loads the python mode (DuckDB + deltalake). See [Python notebooks](#python-notebooks).
+
 This is the deliverable for **Build · Module 4 · Part 1: Custom Environment** on [Inside Microsoft Fabric](https://insidemicrosoftfabric.com/build/04-pyspark-notebooks/01-custom-environment/). The **[Custom Environment Builder](https://insidemicrosoftfabric.com/tools/custom-environment/)** generates the config files in `deploy/` (points 1 to 4) for your own workspaces. Point 5 is your own code, so it's written here, in the repo.
 
 ## What it replaces
@@ -33,23 +35,26 @@ fabric_environment/
     load_save_data.py            # load_data(), save_table()
     schema.py                    # print_schema(), enforce_destination_schema()
     transform.py                 # rename_columns(), trim_string_columns(), deduplicate()...
-    loggers.py                   # NotebookLogger -> control lakehouse
+    loggers.py                   # NotebookLogger -> control lakehouse (Spark or deltalake)
     business.py                  # add_surrogate_key(): template for your business rules
+    py_engine.py                 # python mode: duckdb_connect(), register_delta_views(), save_table_arrow()
   deploy/
     fabric_api.py                # shared: auth, REST client, config validation
     dependencies.py              # shared: wheel dependencies vs each runtime's Python
     check_dependencies.py        # proposes (and applies) compatible versions in pyproject.toml
     list_workspaces.py           # fills workspaces_*.json from Fabric (names + ids)
     bootstrap_environments.py    # once per workspace, with your user
-    deploy.py                    # every release, with the Service Principal (+ runtime changes)
-    environment_dev.jsonc        # names, runtime, Spark properties, compute (documented)
+    deploy.py                    # every release, with the Service Principal (+ runtime changes,
+                                 #   + the wheel for Python notebooks)
+    environment_dev.jsonc        # names, runtime, Spark properties, compute, pythonLibs (documented)
     environment_pro.jsonc
     workspaces_dev.json          # workspace name -> workspace id
     workspaces_pro.json
     examples/environment_runtime_2_0.jsonc
   notebooks/
     nb_check_environment.ipynb   # run after each deploy
-    nb_silver_customers.ipynb    # a Silver notebook using the library
+    nb_silver_customers.ipynb    # a Silver notebook using the library (Spark)
+    nb_gold_open_orders_python.ipynb  # a Gold load in a Python notebook (DuckDB, python mode)
   azure-pipelines.yml            # Build -> DeployDev -> (approval) -> DeployPro
 ```
 
@@ -63,6 +68,7 @@ fabric_environment/
 | 4 | NEE | Per stage | `"spark.native.enabled": "true"` in `sparkProperties` | Environment > Spark compute > Acceleration |
 | 5 | Enterprise functions (`.whl`) | Every workspace | `src/fabric_utils` + `version` in `pyproject.toml` | Environment > Custom libraries |
 | | Current env (`dev` / `pro`) | Per workspace | Variable Library value set | `vl_environment` item |
+| | Wheel for Python notebooks | Per stage | `pythonLibs` | Control lakehouse > `Files/libs/fabric_utils/`, variable `fabric_utils_libs` |
 
 ## 1. Runtime
 
@@ -151,7 +157,7 @@ The shared code that used to live in `%run Functions` notebooks goes in `src/fab
    from fabric_utils.business import add_surrogate_key
    ```
 
-3. Bump `version` in `pyproject.toml` and `__version__` in `__init__.py` (e.g. `0.1.0` -> `0.2.0`).
+3. Bump `version` in `pyproject.toml` and `__version__` in `__init__.py` (e.g. `0.2.0` -> `0.3.0`).
 4. Open a pull request. The pipeline builds the new wheel, deploys it to dev and, after approval, to production.
 
 Keep `dependencies` in `pyproject.toml` short: Fabric installs each one from PyPI when the Environment publishes. PySpark, Delta, pandas and `notebookutils` are already in the runtime.
@@ -192,6 +198,59 @@ log.end()
 The full example is `notebooks/nb_silver_customers.ipynb`.
 
 **Trade-off:** sessions on an Environment with custom libraries don't get the Starter Pool's near-instant start, because the library is installed first (about a minute or more instead of a few seconds). For scheduled pipelines it rarely matters.
+
+## Python notebooks
+
+Python notebooks run on one machine with DuckDB, Polars and deltalake preinstalled, and use far fewer capacity units than Spark for small and medium tables ([benchmark](https://insidemicrosoftfabric.com/articles/spark-vs-duckdb-vs-polars-fabric/)). They can't use an Environment, so:
+
+1. **One wheel, two modes.** `fabric_utils/__init__.py` checks whether `pyspark` and `delta` are importable. In a Python notebook they aren't, so it exports only what works without Spark:
+
+   | Spark mode | Python mode |
+   |---|---|
+   | `load_data` | `duckdb_connect` + `register_delta_views` (one DuckDB view per Delta table) |
+   | `StructType([...])` | `pa.schema([...])` (pyarrow) |
+   | `enforce_destination_schema` + `save_table` | `save_table_arrow(rel, path, table, schema=...)` |
+   | `NotebookLogger` | `NotebookLogger` (same `notebook_logs` table, written with deltalake) |
+   | `get_paths` | `get_paths` |
+
+   `FABRIC_UTILS_ENGINE=spark|python` forces a mode in tests.
+
+2. **The wheel goes to a lakehouse folder.** With `pythonLibs` in `environment_<stage>.jsonc`, `deploy.py` uploads the wheel to `Files/libs/fabric_utils/` of the control lakehouse (OneLake API, seconds, nothing to publish) and deletes the older versions. `--python-libs-only` does only this step.
+
+3. **The Variable Library says where.** `deploy.py` keeps a String variable `fabric_utils_libs` in `vl_environment` of every workspace: the dev folder by default, the pro folder in the `pro` value set. If the workspace is connected to Git, commit the change from the workspace afterwards.
+
+4. **The first cell installs it** (see `notebooks/nb_gold_open_orders_python.ipynb`):
+
+   ```python
+   import importlib.util, subprocess, sys
+   import notebookutils
+
+   if importlib.util.find_spec("fabric_utils") is None:
+       libs = notebookutils.variableLibrary.getLibrary("vl_environment").fabric_utils_libs
+       whl = max((f for f in notebookutils.fs.ls(libs) if f.name.endswith(".whl")), key=lambda f: f.name)
+       notebookutils.fs.cp(whl.path, f"file:/tmp/{whl.name}")
+       subprocess.run([sys.executable, "-m", "pip", "install", "--no-deps", "-q", f"/tmp/{whl.name}"], check=True)
+   ```
+
+   - `--no-deps`: the wheel's dependencies are the Spark side's; duckdb, pyarrow and deltalake are already in the Python runtime.
+   - pip as a Python process, not `%pip`: inline `%pip install` is [disabled by default in pipeline runs](https://learn.microsoft.com/fabric/data-engineering/notebook-limitation#running-notebooks-via-api-or-pipeline-with-inline-pip-installs).
+   - The identity that runs the notebook needs **read** access to the control lakehouse.
+
+Then:
+
+```python
+from fabric_utils import *                       # python mode
+paths = get_paths()
+log = NotebookLogger("nb_gold_open_orders", layer="gold")
+
+con = duckdb_connect()
+register_delta_views(con, paths["path_silver"], ["orders", "customers"])
+rel = con.sql("SELECT ... FROM orders JOIN customers USING (customer_id) WHERE status <> 'SHIPPED'")
+save_table_arrow(rel, paths["path_gold"], "open_orders", schema=destination_schema)
+log.end()
+```
+
+Tables that Spark also writes must not use deletion vectors: delta-rs (deltalake) can't write them.
 
 ## Setup
 
@@ -243,16 +302,16 @@ Creates the `Utils` folder, the empty Environment and the Variable Library in ev
 ### 3. Build and deploy
 
 ```bash
-python -m build --wheel          # dist/fabric_enterprise_utils-0.1.0-py3-none-any.whl
+python -m build --wheel          # dist/fabric_enterprise_utils-0.2.0-py3-none-any.whl
 
 export FABRIC_TENANT_ID=...      # PowerShell: $env:FABRIC_TENANT_ID = "..."
 export FABRIC_CLIENT_ID=...
 export FABRIC_CLIENT_SECRET=...
 
-python deploy/deploy.py --target dev --whl dist/fabric_enterprise_utils-0.1.0-py3-none-any.whl
+python deploy/deploy.py --target dev --whl dist/fabric_enterprise_utils-0.2.0-py3-none-any.whl
 ```
 
-Per workspace: runtime check -> replace wheel -> stage Spark properties + compute -> publish (3-6 min) -> set as workspace default -> activate the value set.
+Per workspace: runtime check -> replace wheel -> stage Spark properties + compute -> publish (3-6 min) -> set as workspace default -> activate the value set. Then, if `pythonLibs` is set: upload the wheel to the control lakehouse and update `fabric_utils_libs` in every workspace ([Python notebooks](#python-notebooks)).
 
 On the first deploy the Environment is still empty, so deploy.py sets `runtimeVersion` from the file (1.3 or 2.0) before uploading. After that, changing the runtime needs `--allow-runtime-change` (step 6).
 
@@ -301,3 +360,6 @@ It runs Microsoft's sequence to avoid `LibraryManagementError` (remove libraries
 | `publish operation in progress` | Someone else is publishing | deploy.py skips that workspace; re-run later |
 | Property added in the UI disappeared | `sparkProperties` is declarative | Add it to the `.jsonc` file |
 | `Could not read 'environment' from the Variable Library` | No `vl_environment` in that workspace | Run bootstrap for that workspace |
+| Python notebook: `AttributeError ... fabric_utils_libs` | Variable not in that workspace's `vl_environment` | Add `pythonLibs` to both `.jsonc` files and deploy |
+| Python notebook: `403` / `404` listing the libs folder | No read access to the control lakehouse, or nothing deployed yet | Give the running identity read on it; `deploy.py --python-libs-only` |
+| Python notebook: `ModuleNotFoundError: pyspark` on import | `FABRIC_UTILS_ENGINE=spark` set in the session | Unset it |
